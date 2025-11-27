@@ -1,4 +1,4 @@
-# Dockerfile — fixes PyAudio wheel build by installing PortAudio dev libs + compiler
+# Fixed Dockerfile — installs PortAudio headers so PyAudio wheel builds
 FROM python:3.12-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -7,30 +7,31 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Install system packages needed for audio libs and building Python extensions
+# Install system/build deps in one RUN (no stray tokens)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \             # compiler, make, etc. — needed to build wheels
-    pkg-config \                  # helps find libs
-    libsndfile1 \                 # for librosa / soundfile
-    ffmpeg \                      # for pydub/ffmpeg usage
-    libportaudio2 \               # PortAudio runtime
-    portaudio19-dev \             # PortAudio headers (required to compile PyAudio)
-    libasound2-dev \              # ALSA dev libs (sometimes required)
+    build-essential \
+    pkg-config \
+    python3-dev \
     ca-certificates \
     curl \
     git \
-    && rm -rf /var/lib/apt/lists/*
+    ffmpeg \
+    libsndfile1 \
+    libportaudio2 \
+    portaudio19-dev \
+    libasound2-dev \
+  && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements early for caching
+# Copy requirements first for better caching
 COPY requirements.txt /app/requirements.txt
 
-# Upgrade pip tooling and ensure wheel is present
+# Upgrade pip tooling
 RUN pip install --upgrade pip setuptools wheel
 
-# Optional: if you need PyTorch CPU wheel pinned, install it here (uncomment and set version)
+# If you need a pinned CPU torch wheel, install it here (uncomment & set version)
 # RUN pip install --no-cache-dir torch==2.2.0+cpu -f https://download.pytorch.org/whl/cpu/torch_stable.html
 
-# Install Python dependencies (prefer binary wheels where available)
+# Install Python dependencies
 RUN pip install --no-cache-dir --prefer-binary -r /app/requirements.txt
 
 # Copy application code
@@ -38,5 +39,5 @@ COPY . /app
 
 EXPOSE 5000
 
-# Use gunicorn in production if you prefer; fallback to `python app.py`
+# Use gunicorn for production; fallback to `python app.py` if you prefer
 CMD ["sh", "-c", "exec gunicorn --bind 0.0.0.0:${PORT:-5000} --workers 1 --threads 4 --timeout 300 app:app"]
