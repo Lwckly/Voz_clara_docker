@@ -1,0 +1,310 @@
+{% extends "base.html" %}
+
+{% block head %}
+<title>VozClara</title>
+<!-- removed LAME.js (not needed for WAV) but you can keep it if you still use mp3 elsewhere -->
+{% endblock %}
+
+{% block body %}
+<main class="app">
+  <div style="display:flex;justify-content:center;margin-top:10px;">
+    <img class="image-light" src="/static/title.png" height="91" width="250" alt="Title Light">
+    <img class="image-dark" src="/static/titledarkmode.png" height="91" width="250" alt="Title Dark">
+  </div>
+
+  <div id="termsOverlay">
+    <div id="termsBox">
+      <h2>Terms and Services</h2>
+      <div id="termsText">
+        <p>Welcome to our service! Please read these terms carefully before using this site.</p>
+        <p>By clicking “I Agree”, you confirm that you have read and accepted our general terms of service, including our data policy and user guidelines.</p>
+        <p>This popup is a placeholder. Replace this text with your actual Terms and Conditions or link to a full version.</p>
+      </div>
+      <button id="acceptButton">I Agree</button>
+    </div>
+  </div>
+
+  <button id="darkModeToggle" title="Alternar modo escuro">🌙</button>
+
+  <section class="center" aria-live="polite" style="margin-top:20px;">
+    <button id="recordButton" class="record-btn" aria-pressed="false" aria-label="Iniciar gravação">
+      <span class="record-icon" id="iconPlay">
+        <svg viewBox="0 0 24 24"><polygon points="8,5 8,19 19,12"/></svg>
+      </span>
+      <span class="record-icon hidden" id="iconStop">
+        <svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12"/></svg>
+      </span>
+    </button>
+    <div id="status" class="status">Iniciar gravação</div>
+  </section>
+
+  <aside class="result-panel" aria-label="Transcrição" style="margin-top:20px;">
+    <div class="result-heading"><h2>Transcrição</h2></div>
+    <div id="result" class="result-content">Nenhuma transcrição ainda.</div>
+  </aside>
+
+  <!-- Bottom-left floating + button -->
+  <div class="bottom-left-container">
+    <div class="dropdown">
+      <button class="dropbtn">
+        <img src="/static/Plussign.png" alt="Opções">
+      </button>
+      <div class="dropdown-content">
+        <a href="#" id="downloadPdf">PDF</a>
+        <a href="#" id="downloadDoc">DOC</a>
+        <a href="#" id="historyBtn">Histórico</a>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<script>
+/* -------------------------
+   WAV conversion & upload
+   - Convert recorded Blob (webm/opus) -> WAV PCM16 mono 16kHz
+   - Upload WAV as "file" in FormData to /upload
+   ------------------------- */
+
+const recordBtn = document.getElementById('recordButton');
+const iconPlay = document.getElementById('iconPlay');
+const iconStop = document.getElementById('iconStop');
+const statusEl = document.getElementById('status');
+const resultEl = document.getElementById('result');
+
+let mediaRecorder, mediaStream, audioChunks = [], recording = false;
+
+function setRecordingUI(isRecording){
+  recording = isRecording;
+  recordBtn.classList.toggle('recording', isRecording);
+  recordBtn.setAttribute('aria-pressed', String(isRecording));
+  iconPlay.classList.toggle('hidden', isRecording);
+  iconStop.classList.toggle('hidden', !isRecording);
+  statusEl.textContent = isRecording ? "Gravando… clique novamente para parar" : "Processando áudio…";
+}
+
+/* --- WAV helper functions --- */
+
+// write ascii string to DataView
+function writeStr(view, offset, str) {
+  for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+}
+
+function floatTo16BitPCM(float32Array) {
+  const buffer = new ArrayBuffer(float32Array.length * 2);
+  const view = new DataView(buffer);
+  let offset = 0;
+  for (let i = 0; i < float32Array.length; i++, offset += 2) {
+    let s = Math.max(-1, Math.min(1, float32Array[i]));
+    s = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    view.setInt16(offset, Math.round(s), true);
+  }
+  return new Uint8Array(buffer);
+}
+
+function buildWavFile(pcm16bytes, sampleRate) {
+  const buffer = new ArrayBuffer(44 + pcm16bytes.length);
+  const view = new DataView(buffer);
+
+  writeStr(view, 0, 'RIFF');
+  view.setUint32(4, 36 + pcm16bytes.length, true);
+  writeStr(view, 8, 'WAVE');
+  writeStr(view, 12, 'fmt ');
+  view.setUint32(16, 16, true); // chunk size
+  view.setUint16(20, 1, true);  // PCM
+  view.setUint16(22, 1, true);  // channels = 1
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true); // byte rate = sampleRate * blockAlign
+  view.setUint16(32, 2, true); // block align
+  view.setUint16(34, 16, true); // bits per sample
+  writeStr(view, 36, 'data');
+  view.setUint32(40, pcm16bytes.length, true);
+  new Uint8Array(buffer, 44).set(pcm16bytes);
+  return new Blob([buffer], { type: 'audio/wav' });
+}
+
+// linear resample
+function resampleLinear(input, srcRate, dstRate) {
+  if (srcRate === dstRate) return input;
+  const srcLength = input.length;
+  const dstLength = Math.round(srcLength * dstRate / srcRate);
+  const out = new Float32Array(dstLength);
+  const ratio = (srcLength - 1) / (dstLength - 1);
+  for (let i = 0; i < dstLength; i++) {
+    const idx = i * ratio;
+    const left = Math.floor(idx);
+    const right = Math.min(left + 1, srcLength - 1);
+    const t = idx - left;
+    out[i] = input[left] * (1 - t) + input[right] * t;
+  }
+  return out;
+}
+
+// downmix to mono
+function downmixToMono(buffer) {
+  if (buffer.numberOfChannels === 1) return buffer.getChannelData(0);
+  const len = buffer.length;
+  const out = new Float32Array(len);
+  const numCh = buffer.numberOfChannels;
+  for (let c = 0; c < numCh; c++) {
+    const ch = buffer.getChannelData(c);
+    for (let i = 0; i < len; i++) out[i] += ch[i];
+  }
+  for (let i = 0; i < len; i++) out[i] /= numCh;
+  return out;
+}
+
+/* Convert a recorded Blob (webm/opus) to WAV PCM16 mono 16k */
+async function blobToWav16kMono(blob) {
+  const arrayBuffer = await blob.arrayBuffer();
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+
+  // downmix
+  let mono = downmixToMono(audioBuffer);
+  const srcRate = audioBuffer.sampleRate;
+  const dstRate = 16000;
+
+  // resample
+  if (srcRate !== dstRate) mono = resampleLinear(mono, srcRate, dstRate);
+
+  // convert to PCM16 bytes and build WAV blob
+  const pcm16 = floatTo16BitPCM(mono);
+  const wavBlob = buildWavFile(pcm16, dstRate);
+
+  // close audio context if supported
+  if (typeof audioCtx.close === 'function') audioCtx.close();
+
+  return { wavBlob, pcmFloat32: mono, sampleRate: dstRate };
+}
+
+/* --- upload WAV --- */
+async function uploadWav(wavBlob, filename = 'gravacao.wav') {
+  const formData = new FormData();
+  formData.append('file', wavBlob, filename);
+  return fetch('/upload', {
+    method: 'POST',
+    body: formData
+  });
+}
+
+/* --- Recording flow --- */
+async function startRecording(){
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioChunks = [];
+    mediaRecorder = new MediaRecorder(mediaStream);
+
+    mediaRecorder.ondataavailable = e => {
+      if (e.data && e.data.size > 0) audioChunks.push(e.data);
+    };
+
+    mediaRecorder.onstop = async () => {
+      mediaStream.getTracks().forEach(t => t.stop());
+      setRecordingUI(false);
+      statusEl.textContent = "Processando áudio (convertendo para WAV)...";
+
+      const rawBlob = new Blob(audioChunks, { type: 'audio/webm' });
+      try {
+        const { wavBlob, pcmFloat32, sampleRate } = await blobToWav16kMono(rawBlob);
+        statusEl.textContent = "Enviando WAV para o servidor...";
+        const res = await uploadWav(wavBlob, 'gravacao_16k_mono.wav');
+
+        if (!res.ok) {
+          const txt = await res.text();
+          console.error('Upload error', res.status, txt);
+          statusEl.textContent = "Erro no upload.";
+          resultEl.textContent = "Erro do servidor: " + res.status;
+          return;
+        }
+
+        const json = await res.json();
+        statusEl.textContent = "Upload concluído!";
+        resultEl.textContent = json.transcription || '(sem texto)';
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = "Erro ao processar/enviar áudio.";
+      }
+    };
+
+    mediaRecorder.start();
+    setRecordingUI(true);
+    statusEl.textContent = "Gravando (clique para parar)...";
+
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = "Não foi possível acessar o microfone.";
+    setRecordingUI(false);
+  }
+}
+
+function stopRecording(){
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+  else {
+    setRecordingUI(false);
+    statusEl.textContent = "Nenhuma gravação ativa.";
+  }
+}
+
+recordBtn.addEventListener('click', ()=> recording ? stopRecording() : startRecording());
+
+/* --- UI extras (downloads, dropdown, dark mode) --- */
+const dropbtn = document.querySelector('.dropbtn');
+if (dropbtn) {
+  dropbtn.addEventListener('click', e => { e.stopPropagation(); dropbtn.parentElement.classList.toggle('show'); });
+}
+window.addEventListener('click', () => {
+  document.querySelectorAll('.dropdown').forEach(d => d.classList.remove('show'));
+});
+
+document.getElementById('downloadPdf').addEventListener('click', ()=> {
+  const text = resultEl.textContent.trim();
+  if(!text) return alert("Nenhuma transcrição para PDF!");
+  const doc = new jsPDF.jsPDF();
+  const lines = doc.splitTextToSize(text, 180);
+  doc.text(lines, 10, 10);
+  doc.save("transcricao.pdf");
+});
+
+document.getElementById('downloadDoc').addEventListener('click', ()=> {
+  const text = resultEl.textContent.trim();
+  if(!text) return alert("Nenhuma transcrição para DOC!");
+  const blob = new Blob([text], { type: "application/msword" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = "transcricao.doc";
+  link.click();
+});
+
+document.getElementById('historyBtn').addEventListener('click', ()=> {
+  alert("Histórico ainda não implementado.");
+});
+
+const darkModeToggle = document.getElementById('darkModeToggle');
+const lightImg = document.querySelector('.image-light');
+const darkImg = document.querySelector('.image-dark');
+
+function updateImages() {
+  if(document.body.classList.contains('dark')){
+    lightImg.style.display = 'none';
+    darkImg.style.display = 'block';
+  } else {
+    lightImg.style.display = 'block';
+    darkImg.style.display = 'none';
+  }
+}
+
+darkModeToggle.addEventListener('click', ()=> {
+  document.body.classList.toggle('dark');
+  darkModeToggle.textContent = document.body.classList.contains('dark') ? '☀️' : '🌙';
+  updateImages();
+});
+
+if(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches){
+  document.body.classList.add('dark');
+}
+updateImages();
+
+</script>
+
+{% endblock %}
