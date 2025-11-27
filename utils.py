@@ -6,6 +6,15 @@ from pydub import AudioSegment
 import io
 import librosa
 
+_model = None
+_processor = None
+
+def _ensure_model():
+    global _model, _processor
+    if _model is None:
+        _processor = WhisperProcessor.from_pretrained(MODEL_NAME)
+        _model = WhisperForConditionalGeneration.from_pretrained(MODEL_NAME).to(DEVICE)
+
 # --- 1. CARREGAMENTO DO MODELO WHISPER ---
 # Esta parte é a mesma do nosso servidor, carregamos o modelo uma vez.
 
@@ -27,6 +36,7 @@ except Exception as e:
 # --- 2. LÓGICA DE GRAVAÇÃO E TRANSCRIÇÃO ---
 
 def process_wav_bytes(audio_file):
+    _ensure_model()
     """
     Processa um áudio WAV bruto (bytes) e retorna a transcrição usando Whisper.
 
