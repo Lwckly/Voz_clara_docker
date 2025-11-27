@@ -40,4 +40,6 @@ COPY . /app
 EXPOSE 5000
 
 # Use gunicorn for the Flask app (Render sets $PORT). Fallback to 5000 locally.
-CMD ["sh", "-c", "exec gunicorn --bind 0.0.0.0:${PORT:-5000} --workers 1 --threads 4 --timeout 300 app:app"]
+CMD ["sh", "-c", "echo \"Starting with PORT=${PORT:-5000}\" && exec gunicorn app:app --bind 0.0.0.0:${PORT:-5000} --workers 1 --threads 4 --timeout 300 --access-logfile - --error-logfile - --log-level info"]
+
+
