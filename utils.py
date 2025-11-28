@@ -19,7 +19,7 @@ def _ensure_model():
 # Esta parte é a mesma do nosso servidor, carregamos o modelo uma vez.
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-MODEL_NAME = "openai/whisper-tiny"
+MODEL_NAME = "openai/whisper-small"
 
 #print("--- Iniciando Script de Teste de Transcrição ---")
 #print(f"Usando dispositivo: {DEVICE}")
